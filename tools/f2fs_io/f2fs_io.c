@@ -213,7 +213,8 @@ static void do_set_verity(int argc, char **argv, const struct cmd_desc *cmd)
 "  verity\n"							\
 "  casefold\n"							\
 "  compression\n"						\
-"  nocompression\n"
+"  nocompression\n"						\
+"  immutable\n"
 
 static void do_getflags(int argc, char **argv, const struct cmd_desc *cmd)
 {
@@ -271,6 +272,12 @@ static void do_getflags(int argc, char **argv, const struct cmd_desc *cmd)
 		printf("nocow(pinned)");
 		exist = 1;
 	}
+	if (flag & FS_IMMUTABLE_FL) {
+		if (exist)
+			printf(",");
+		printf("immutable");
+		exist = 1;
+	}
 	if (!exist)
 		printf("none");
 	printf("\n");
@@ -284,7 +291,8 @@ static void do_getflags(int argc, char **argv, const struct cmd_desc *cmd)
 "flag can be\n"							\
 "  casefold\n"							\
 "  compression\n"						\
-"  nocompression\n"
+"  nocompression\n"						\
+"  noimmutable\n"
 
 static void do_setflags(int argc, char **argv, const struct cmd_desc *cmd)
 {
@@ -310,6 +318,8 @@ static void do_setflags(int argc, char **argv, const struct cmd_desc *cmd)
 		flag |= FS_COMPR_FL;
 	else if (!strcmp(argv[1], "nocompression"))
 		flag |= FS_NOCOMP_FL;
+	else if (!strcmp(argv[1], "noimmutable"))
+		flag &= ~FS_IMMUTABLE_FL;
 
 	ret = ioctl(fd, F2FS_IOC_SETFLAGS, &flag);
 	printf("set a flag on %s ret=%d, flags=%s\n", argv[2], ret, argv[1]);
@@ -1096,6 +1106,68 @@ static void do_compress(int argc, char **argv, const struct cmd_desc *cmd)
 	exit(0);
 }
 
+#define get_filename_encrypt_mode_desc "get file name encrypt mode"
+#define get_filename_encrypt_mode_help					\
+"f2fs_io filename_encrypt_mode [file or directory path]\n\n"		\
+"Get the file name encription mode of the given file/directory.\n"	\
+
+static void do_get_filename_encrypt_mode (int argc, char **argv,
+						const struct cmd_desc *cmd)
+{
+	static const char *enc_name[] = {
+		"invalid", /* FS_ENCRYPTION_MODE_INVALID (0) */
+		"aes-256-xts", /* FS_ENCRYPTION_MODE_AES_256_XTS (1) */
+		"aes-256-gcm", /* FS_ENCRYPTION_MODE_AES_256_GCM (2) */
+		"aes-256-cbc", /* FS_ENCRYPTION_MODE_AES_256_CBC (3) */
+		"aes-256-cts", /* FS_ENCRYPTION_MODE_AES_256_CTS (4) */
+		"aes-128-cbc", /* FS_ENCRYPTION_MODE_AES_128_CBC (5) */
+		"aes-128-cts", /* FS_ENCRYPTION_MODE_AES_128_CTS (6) */
+		"speck128-256-xts", /* FS_ENCRYPTION_MODE_SPECK128_256_XTS (7) */
+		"speck128-256-cts", /* FS_ENCRYPTION_MODE_SPECK128_256_CTS (8) */
+		"adiantum", /* FS_ENCRYPTION_MODE_ADIANTUM (9) */
+	};
+	int fd, mode, ret;
+	struct fscrypt_get_policy_ex_arg arg;
+
+	if (argc != 2) {
+		fputs("Excess arguments\n\n", stderr);
+		fputs(cmd->cmd_help, stderr);
+		exit(1);
+	}
+
+	fd = xopen(argv[1], O_RDONLY, 0);
+	arg.policy_size = sizeof(arg.policy);
+	ret = ioctl(fd, FS_IOC_GET_ENCRYPTION_POLICY_EX, &arg);
+	if (ret != 0 && errno == ENOTTY)
+		ret = ioctl(fd, FS_IOC_GET_ENCRYPTION_POLICY, arg.policy.v1);
+	close(fd);
+
+	if (ret) {
+		perror("FS_IOC_GET_ENCRYPTION_POLICY|_EX");
+		exit(1);
+	}
+
+	switch (arg.policy.version) {
+	case FSCRYPT_POLICY_V1:
+		mode = arg.policy.v1.filenames_encryption_mode;
+		break;
+	case FSCRYPT_POLICY_V2:
+		mode = arg.policy.v2.filenames_encryption_mode;
+		break;
+	default:
+		printf("Do not support policy version: %d\n",
+							arg.policy.version);
+		exit(1);
+	}
+
+	if (mode >= sizeof(enc_name)/sizeof(enc_name[0])) {
+		printf("Do not support algorithm: %d\n", mode);
+		exit(1);
+	}
+	printf ("%s\n", enc_name[mode]);
+	exit(0);
+}
+
 #define CMD_HIDDEN 	0x0001
 #define CMD(name) { #name, do_##name, name##_desc, name##_help, 0 }
 #define _CMD(name) { #name, do_##name, NULL, NULL, CMD_HIDDEN }
@@ -1125,6 +1197,7 @@ const struct cmd_desc cmd_list[] = {
 	CMD(set_coption),
 	CMD(decompress),
 	CMD(compress),
+	CMD(get_filename_encrypt_mode),
 	{ NULL, NULL, NULL, NULL, 0 }
 };
 

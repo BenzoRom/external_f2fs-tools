@@ -71,6 +71,7 @@ void fsck_usage()
 	MSG(0, "  -d debug level [default:0]\n");
 	MSG(0, "  -f check/fix entire partition\n");
 	MSG(0, "  -g add default options\n");
+	MSG(0, "  -l show superblock/checkpoint\n");
 	MSG(0, "  -O feature1[feature2,feature3,...] e.g. \"encrypt\"\n");
 	MSG(0, "  -p preen mode [default:0 the same as -a [0|1]]\n");
 	MSG(0, "  -S sparse_mode\n");
@@ -138,6 +139,7 @@ void sload_usage()
 	MSG(0, "  -S sparse_mode\n");
 	MSG(0, "  -t mount point [prefix of target fs path, default:/]\n");
 	MSG(0, "  -T timestamp\n");
+	MSG(0, "  -P preserve owner: user and group\n");
 	MSG(0, "  -c enable compression (default allow policy)\n");
 	MSG(0, "    ------------ Compression sub-options -----------------\n");
 	MSG(0, "    -L <log-of-blocks-per-cluster>, default 2\n");
@@ -150,6 +152,14 @@ void sload_usage()
 	MSG(0, "    -r readonly (IMMUTABLE) for compressed files\n");
 	MSG(0, "    ------------------------------------------------------\n");
 	MSG(0, "  -d debug level [default:0]\n");
+	MSG(0, "  -V print the version number and exit\n");
+	exit(1);
+}
+
+void label_usage()
+{
+	MSG(0, "\nUsage: f2fslabel [options] device [volume-label]\n");
+	MSG(0, "[options]:\n");
 	MSG(0, "  -V print the version number and exit\n");
 	exit(1);
 }
@@ -176,6 +186,8 @@ static void error_out(char *prog)
 		resize_usage();
 	else if (!strcmp("sload.f2fs", prog))
 		sload_usage();
+	else if (!strcmp("f2fslabel", prog))
+		label_usage();
 	else
 		MSG(0, "\nWrong program.\n");
 }
@@ -215,7 +227,7 @@ void f2fs_parse_options(int argc, char *argv[])
 	}
 
 	if (!strcmp("fsck.f2fs", prog)) {
-		const char *option_string = ":aC:c:m:d:fg:O:p:q:StyV";
+		const char *option_string = ":aC:c:m:d:fg:lO:p:q:StyV";
 		int opt = 0, val;
 		char *token;
 		struct option long_opt[] = {
@@ -261,6 +273,9 @@ void f2fs_parse_options(int argc, char *argv[])
 			case 'g':
 				if (!strcmp(optarg, "android"))
 					c.defset = CONF_ANDROID;
+				break;
+			case 'l':
+				c.layout = 1;
 				break;
 			case 'O':
 				if (parse_feature(feature_table, optarg))
@@ -505,7 +520,7 @@ void f2fs_parse_options(int argc, char *argv[])
 #endif
 	} else if (!strcmp("resize.f2fs", prog)) {
 #ifdef WITH_RESIZE
-		const char *option_string = "d:st:iV";
+		const char *option_string = "d:fst:iV";
 
 		c.func = RESIZE;
 		while ((option = getopt(argc, argv, option_string)) != EOF) {
@@ -520,6 +535,10 @@ void f2fs_parse_options(int argc, char *argv[])
 				c.dbg_lv = atoi(optarg);
 				MSG(0, "Info: Debug level = %d\n",
 							c.dbg_lv);
+				break;
+			case 'f':
+				c.force = 1;
+				MSG(0, "Info: Force to resize\n");
 				break;
 			case 's':
 				c.safe_resize = 1;
@@ -549,7 +568,7 @@ void f2fs_parse_options(int argc, char *argv[])
 #endif
 	} else if (!strcmp("sload.f2fs", prog)) {
 #ifdef WITH_SLOAD
-		const char *option_string = "cL:a:i:x:m:rC:d:f:p:s:St:T:V";
+		const char *option_string = "cL:a:i:x:m:rC:d:f:p:s:St:T:VP";
 #ifdef HAVE_LIBSELINUX
 		int max_nr_opt = (int)sizeof(c.seopt_file) /
 			sizeof(c.seopt_file[0]);
@@ -685,6 +704,9 @@ void f2fs_parse_options(int argc, char *argv[])
 			case 'V':
 				show_version(prog);
 				exit(0);
+			case 'P':
+				c.preserve_perms = 1;
+				break;
 			default:
 				err = EUNKNOWN_OPT;
 				break;
@@ -714,6 +736,39 @@ void f2fs_parse_options(int argc, char *argv[])
 			}
 		}
 #endif /* WITH_SLOAD */
+	} else if (!strcmp("f2fslabel", prog)) {
+#ifdef WITH_LABEL
+		const char *option_string = "V";
+
+		c.func = LABEL;
+		while ((option = getopt(argc, argv, option_string)) != EOF) {
+			switch (option) {
+			case 'V':
+				show_version(prog);
+				exit(0);
+			default:
+				err = EUNKNOWN_OPT;
+				break;
+			}
+			if (err != NOERROR)
+				break;
+		}
+
+		if (argc > (optind + 2)) { /* unknown argument(s) is(are) passed */
+			optind += 2;
+			err = EUNKNOWN_ARG;
+		} else if (argc == (optind + 2)) { /* change label */
+			c.vol_label = argv[optind + 1];
+			argc--;
+		} else { /* print label */
+			/*
+			 * Since vol_label was initialized as "", in order to
+			 * distinguish between clear label and print, set
+			 * vol_label as NULL for print case
+			 */
+			c.vol_label = NULL;
+		}
+#endif /* WITH_LABEL */
 	}
 
 	if (err == NOERROR) {
@@ -860,6 +915,11 @@ static int do_defrag(struct f2fs_sb_info *sbi)
 {
 	struct f2fs_super_block *sb = F2FS_RAW_SUPER(sbi);
 
+	if (get_sb(feature) & cpu_to_le32(F2FS_FEATURE_RO)) {
+		MSG(0, "Not support on readonly image.\n");
+		return -1;
+	}
+
 	if (c.defrag_start > get_sb(block_count))
 		goto out_range;
 	if (c.defrag_start < SM_I(sbi)->main_blkaddr)
@@ -960,6 +1020,36 @@ static int do_sload(struct f2fs_sb_info *sbi)
 		return -1;
 
 	return f2fs_sload(sbi);
+}
+#endif
+
+#ifdef WITH_LABEL
+static int do_label(struct f2fs_sb_info *sbi)
+{
+	struct f2fs_super_block *sb = F2FS_RAW_SUPER(sbi);
+
+	if (!c.vol_label) {
+		char label[MAX_VOLUME_NAME];
+
+		utf16_to_utf8(label, sb->volume_name,
+			      MAX_VOLUME_NAME, MAX_VOLUME_NAME);
+		MSG(0, "Info: volume label = %s\n", label);
+		return 0;
+	}
+
+	if (strlen(c.vol_label) > MAX_VOLUME_NAME) {
+		ERR_MSG("Label should not exceed %d characters\n", MAX_VOLUME_NAME);
+		return -1;
+	}
+
+	utf8_to_utf16(sb->volume_name, (const char *)c.vol_label,
+		      MAX_VOLUME_NAME, strlen(c.vol_label));
+
+	update_superblock(sb, SB_MASK_ALL);
+
+	MSG(0, "Info: volume label is changed to %s\n", c.vol_label);
+
+	return 0;
 }
 #endif
 
@@ -1076,6 +1166,12 @@ fsck_again:
 		c.func = FSCK;
 		c.fix_on = 1;
 		goto fsck_again;
+#endif
+#ifdef WITH_LABEL
+	case LABEL:
+		if (do_label(sbi))
+			goto out_err;
+		break;
 #endif
 	default:
 		ERR_MSG("Wrong program name\n");
